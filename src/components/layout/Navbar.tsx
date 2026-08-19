@@ -27,6 +27,9 @@ export const Navbar: React.FC = () => {
     setIsQuickAddOpen,
     setIsAddExpenseOpen,
     resetToDefault,
+    isFirebaseConnected,
+    isSyncing,
+    syncAllToFirebase,
   } = useApp();
 
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
@@ -114,6 +117,19 @@ export const Navbar: React.FC = () => {
 
           {/* Action Tools & Fast Triggers */}
           <div className="flex items-center gap-2 sm:gap-3">
+            {/* Cloud Sync Status Badge */}
+            <button
+              onClick={() => syncAllToFirebase()}
+              disabled={isSyncing}
+              className="hidden md:flex items-center gap-1.5 px-2.5 py-1.5 bg-slate-900 hover:bg-slate-850 border border-slate-800 rounded-xl text-xs font-semibold text-slate-300 transition-colors"
+              title="Đồng bộ dữ liệu thời gian thực với Firebase Cloud"
+            >
+              <span className={`w-2 h-2 rounded-full ${isSyncing ? 'bg-amber-400 animate-ping' : isFirebaseConnected ? 'bg-emerald-400' : 'bg-slate-500'}`} />
+              <span className="text-[11px] text-slate-400">
+                {isSyncing ? 'Syncing...' : isFirebaseConnected ? 'Cloud Synced' : 'Offline'}
+              </span>
+            </button>
+
             {/* Quick Add Button (Hero on-set action) */}
             <button
               onClick={() => setIsQuickAddOpen(true)}

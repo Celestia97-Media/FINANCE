@@ -1,6 +1,16 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { MediaJob, Expense, Approval, ActiveScreen, ExpenseDocument } from '../types';
 import { INITIAL_JOBS, INITIAL_EXPENSES, INITIAL_APPROVALS } from '../data/mockData';
+import {
+  subscribeToJobs,
+  subscribeToExpenses,
+  subscribeToApprovals,
+  saveJobToFirestore,
+  deleteJobFromFirestore,
+  saveExpenseToFirestore,
+  deleteExpenseFromFirestore,
+  saveApprovalToFirestore,
+} from '../services/firebaseService';
 import confetti from 'canvas-confetti';
 
 interface AppContextType {
@@ -12,6 +22,10 @@ interface AppContextType {
   selectedJobId: string;
   setSelectedJobId: (id: string) => void;
   selectedJob: MediaJob | undefined;
+
+  // Cloud Sync Status
+  isFirebaseConnected: boolean;
+  isSyncing: boolean;
 
   // Modals
   isQuickAddOpen: boolean;
@@ -57,6 +71,7 @@ interface AppContextType {
 
   // Data Reset & Persistence
   resetToDefault: () => void;
+  syncAllToFirebase: () => Promise<void>;
 }
 
 const AppContext = createContext<AppContextType | undefined>(undefined);
@@ -107,6 +122,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [activeScreen, setActiveScreen] = useState<ActiveScreen>('dashboard');
   const [selectedJobId, setSelectedJobId] = useState<string>('job-summer-2026');
 
+  // Firebase status
+  const [isFirebaseConnected, setIsFirebaseConnected] = useState<boolean>(true);
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+
   // Modals state
   const [isQuickAddOpen, setIsQuickAddOpen] = useState(false);
   const [isAddExpenseOpen, setIsAddExpenseOpen] = useState(false);
@@ -125,6 +144,51 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.APPROVALS, JSON.stringify(approvals));
   }, [approvals]);
+
+  // Subscribe to Firebase Firestore real-time updates
+  useEffect(() => {
+    const unsubJobs = subscribeToJobs(
+      (remoteJobs) => {
+        if (remoteJobs.length > 0) {
+          setJobs(remoteJobs);
+          setIsFirebaseConnected(true);
+        }
+      },
+      (err) => {
+        console.warn('Firebase jobs subscription notice:', err?.message || err);
+      }
+    );
+
+    const unsubExpenses = subscribeToExpenses(
+      (remoteExpenses) => {
+        if (remoteExpenses.length > 0) {
+          setExpenses(remoteExpenses);
+          setIsFirebaseConnected(true);
+        }
+      },
+      (err) => {
+        console.warn('Firebase expenses subscription notice:', err?.message || err);
+      }
+    );
+
+    const unsubApprovals = subscribeToApprovals(
+      (remoteApprovals) => {
+        if (remoteApprovals.length > 0) {
+          setApprovals(remoteApprovals);
+          setIsFirebaseConnected(true);
+        }
+      },
+      (err) => {
+        console.warn('Firebase approvals subscription notice:', err?.message || err);
+      }
+    );
+
+    return () => {
+      unsubJobs();
+      unsubExpenses();
+      unsubApprovals();
+    };
+  }, []);
 
   const selectedJob = jobs.find((j) => j.job_id === selectedJobId) || jobs[0];
 
@@ -203,6 +267,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const stats = computeStats();
 
+  // Push all local data to Firebase cloud
+  const syncAllToFirebase = async () => {
+    setIsSyncing(true);
+    try {
+      for (const job of jobs) {
+        await saveJobToFirestore(job);
+      }
+      for (const exp of expenses) {
+        await saveExpenseToFirestore(exp);
+      }
+      for (const appr of approvals) {
+        await saveApprovalToFirestore(appr);
+      }
+    } catch (e) {
+      console.warn('Sync all error:', e);
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
   // Actions
   const addJob = (jobData: Omit<MediaJob, 'job_id' | 'created_at'>) => {
     const newJob: MediaJob = {
@@ -212,12 +296,20 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
     setJobs((prev) => [newJob, ...prev]);
     setSelectedJobId(newJob.job_id);
+    saveJobToFirestore(newJob);
     return newJob;
   };
 
   const updateJob = (job_id: string, updates: Partial<MediaJob>) => {
     setJobs((prev) =>
-      prev.map((job) => (job.job_id === job_id ? { ...job, ...updates } : job))
+      prev.map((job) => {
+        if (job.job_id === job_id) {
+          const updated = { ...job, ...updates };
+          saveJobToFirestore(updated);
+          return updated;
+        }
+        return job;
+      })
     );
   };
 
@@ -225,6 +317,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setJobs((prev) => prev.filter((job) => job.job_id !== job_id));
     setExpenses((prev) => prev.filter((exp) => exp.job_id !== job_id));
     setApprovals((prev) => prev.filter((appr) => appr.job_id !== job_id));
+    deleteJobFromFirestore(job_id);
     if (selectedJobId === job_id && jobs.length > 1) {
       const remaining = jobs.filter((j) => j.job_id !== job_id);
       setSelectedJobId(remaining[0]?.job_id || '');
@@ -240,6 +333,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
 
     setExpenses((prev) => [newExpense, ...prev]);
+    saveExpenseToFirestore(newExpense);
 
     // If expense requires approval (e.g. Reimbursement or Waiting Approval)
     if (
@@ -260,6 +354,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         submitted_at: new Date().toISOString(),
       };
       setApprovals((prev) => [newApproval, ...prev]);
+      saveApprovalToFirestore(newApproval);
     }
 
     return newExpense;
@@ -267,13 +362,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const updateExpense = (expense_id: string, updates: Partial<Expense>) => {
     setExpenses((prev) =>
-      prev.map((exp) => (exp.expense_id === expense_id ? { ...exp, ...updates } : exp))
+      prev.map((exp) => {
+        if (exp.expense_id === expense_id) {
+          const updated = { ...exp, ...updates };
+          saveExpenseToFirestore(updated);
+          return updated;
+        }
+        return exp;
+      })
     );
   };
 
   const deleteExpense = (expense_id: string) => {
     setExpenses((prev) => prev.filter((exp) => exp.expense_id !== expense_id));
     setApprovals((prev) => prev.filter((appr) => appr.expense_id !== expense_id));
+    deleteExpenseFromFirestore(expense_id);
   };
 
   const approveItem = (
@@ -284,21 +387,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setApprovals((prev) =>
       prev.map((appr) => {
         if (appr.approval_id === approval_id) {
-          // Also update corresponding expense status to Approved / Paid
-          setExpenses((prevExp) =>
-            prevExp.map((exp) =>
-              exp.expense_id === appr.expense_id
-                ? { ...exp, payment_status: 'Approved' }
-                : exp
-            )
-          );
-          return {
+          const updatedAppr: Approval = {
             ...appr,
             status: 'Approved',
             approver: approverName,
             comment,
             approved_at: new Date().toISOString(),
           };
+          saveApprovalToFirestore(updatedAppr);
+
+          // Also update corresponding expense status to Approved
+          setExpenses((prevExp) =>
+            prevExp.map((exp) => {
+              if (exp.expense_id === appr.expense_id) {
+                const updatedExp: Expense = { ...exp, payment_status: 'Approved' };
+                saveExpenseToFirestore(updatedExp);
+                return updatedExp;
+              }
+              return exp;
+            })
+          );
+
+          return updatedAppr;
         }
         return appr;
       })
@@ -311,9 +421,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         spread: 70,
         origin: { y: 0.6 },
       });
-    } catch (e) {
-      // Ignore if canvas isn't supported
-    }
+    } catch (e) {}
   };
 
   const rejectItem = (
@@ -324,21 +432,28 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setApprovals((prev) =>
       prev.map((appr) => {
         if (appr.approval_id === approval_id) {
-          // Also update corresponding expense status to Rejected
-          setExpenses((prevExp) =>
-            prevExp.map((exp) =>
-              exp.expense_id === appr.expense_id
-                ? { ...exp, payment_status: 'Rejected' }
-                : exp
-            )
-          );
-          return {
+          const updatedAppr: Approval = {
             ...appr,
             status: 'Rejected',
             approver: approverName,
             comment,
             approved_at: new Date().toISOString(),
           };
+          saveApprovalToFirestore(updatedAppr);
+
+          // Also update corresponding expense status to Rejected
+          setExpenses((prevExp) =>
+            prevExp.map((exp) => {
+              if (exp.expense_id === appr.expense_id) {
+                const updatedExp: Expense = { ...exp, payment_status: 'Rejected' };
+                saveExpenseToFirestore(updatedExp);
+                return updatedExp;
+              }
+              return exp;
+            })
+          );
+
+          return updatedAppr;
         }
         return appr;
       })
@@ -370,6 +485,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         selectedJobId,
         setSelectedJobId,
         selectedJob,
+        isFirebaseConnected,
+        isSyncing,
         isQuickAddOpen,
         setIsQuickAddOpen,
         isAddExpenseOpen,
@@ -393,6 +510,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         getJobCategoryCost,
         getJobCategoryBreakdown,
         resetToDefault,
+        syncAllToFirebase,
       }}
     >
       {children}
